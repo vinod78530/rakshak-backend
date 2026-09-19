@@ -2,8 +2,8 @@ const http = require('http');
 
 const PORT = process.env.PORT || 5000;
 
-// --- ONLINE DATA STORE ---
-let shelters = [
+// --- INITIAL DEFAULT DATA SET ---
+const DEFAULT_SHELTERS = [
     {
         id: 1,
         name: "Kalinga Stadium Relief Camp",
@@ -36,6 +36,8 @@ let shelters = [
     }
 ];
 
+// --- ONLINE DATA STORE ---
+let shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
 let sosAlerts = [];
 let supplyRequests = [];
 
@@ -95,6 +97,21 @@ const server = http.createServer(async (req, res) => {
             status: "OK",
             server: "Rakshak Online Cloud Server",
             timestamp: new Date().toISOString()
+        });
+    }
+
+    // --- DATA RESET ENDPOINT ---
+    if ((method === 'POST' || method === 'GET') && (path === '/reset' || path === '/admin/reset')) {
+        shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
+        sosAlerts = [];
+        supplyRequests = [];
+        console.log(`[CLOUD SERVER] 🔄 Database & Backend Saved Data Reset to Default Clean State!`);
+        return sendJSON(res, 200, {
+            success: true,
+            message: "Backend data reset to default clean state successfully!",
+            sheltersCount: shelters.length,
+            sosAlertsCount: 0,
+            supplyRequestsCount: 0
         });
     }
 
