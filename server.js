@@ -82,11 +82,15 @@ const server = http.createServer(async (req, res) => {
         return res.end();
     }
 
-    const url = req.url;
+    // Normalize URL path to accept routes both with and without '/api'
+    let rawPath = req.url.split('?')[0];
+    let path = rawPath.startsWith('/api') ? rawPath.substring(4) : rawPath;
+    if (!path || path === '') path = '/';
+
     const method = req.method;
 
     // --- HEALTH CHECK ---
-    if (method === 'GET' && url === '/api/health') {
+    if (method === 'GET' && (path === '/health' || path === '/')) {
         return sendJSON(res, 200, {
             status: "OK",
             server: "Rakshak Online Cloud Server",
@@ -95,7 +99,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- ROLE AUTHENTICATION ---
-    if (method === 'POST' && url === '/api/auth/verify-role') {
+    if (method === 'POST' && path === '/auth/verify-role') {
         const body = await getRequestBody(req);
         const expected = ROLE_PASSWORDS[body.role];
         if (expected && body.password === expected) {
@@ -105,11 +109,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- SHELTERS API ---
-    if (method === 'GET' && url === '/api/shelters') {
+    if (method === 'GET' && path === '/shelters') {
         return sendJSON(res, 200, { success: true, count: shelters.length, shelters });
     }
 
-    if (method === 'POST' && url === '/api/shelters') {
+    if (method === 'POST' && path === '/shelters') {
         const body = await getRequestBody(req);
         if (!body.name || !body.capacity) {
             return sendJSON(res, 400, { success: false, error: "Name and capacity are required" });
@@ -129,9 +133,9 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 201, { success: true, shelter: newShelter });
     }
 
-    if (method === 'PUT' && url.startsWith('/api/shelters/') && url.endsWith('/occupancy')) {
-        const parts = url.split('/');
-        const id = parseInt(parts[3]);
+    if (method === 'PUT' && path.startsWith('/shelters/') && path.endsWith('/occupancy')) {
+        const parts = path.split('/');
+        const id = parseInt(parts[2]);
         const body = await getRequestBody(req);
         const shelter = shelters.find(s => s.id === id);
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
@@ -141,8 +145,8 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { success: true, shelter });
     }
 
-    if (method === 'DELETE' && url.startsWith('/api/shelters/')) {
-        const id = parseInt(url.split('/')[3]);
+    if (method === 'DELETE' && path.startsWith('/shelters/')) {
+        const id = parseInt(path.split('/')[2]);
         const idx = shelters.findIndex(s => s.id === id);
         if (idx === -1) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
 
@@ -152,11 +156,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- SOS EMERGENCY ALERTS API ---
-    if (method === 'GET' && url === '/api/sos') {
+    if (method === 'GET' && path === '/sos') {
         return sendJSON(res, 200, { success: true, alerts: sosAlerts });
     }
 
-    if (method === 'POST' && url === '/api/sos') {
+    if (method === 'POST' && path === '/sos') {
         const body = await getRequestBody(req);
         const newAlert = {
             id: Date.now(),
@@ -172,8 +176,8 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 201, { success: true, alert: newAlert });
     }
 
-    if (method === 'PUT' && url.startsWith('/api/sos/') && url.endsWith('/status')) {
-        const id = parseInt(url.split('/')[3]);
+    if (method === 'PUT' && path.startsWith('/sos/') && path.endsWith('/status')) {
+        const id = parseInt(path.split('/')[2]);
         const body = await getRequestBody(req);
         const alert = sosAlerts.find(a => a.id === id);
         if (!alert) return sendJSON(res, 404, { success: false, error: "Alert not found" });
@@ -184,11 +188,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- SUPPLY REQUESTS & NGO PLEDGES API ---
-    if (method === 'GET' && url === '/api/requests') {
+    if (method === 'GET' && path === '/requests') {
         return sendJSON(res, 200, { success: true, requests: supplyRequests });
     }
 
-    if (method === 'POST' && url === '/api/requests') {
+    if (method === 'POST' && path === '/requests') {
         const body = await getRequestBody(req);
         const shelter = shelters.find(s => s.id === parseInt(body.shelterId));
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
@@ -205,7 +209,7 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 201, { success: true, request: newReq });
     }
 
-    if (method === 'POST' && url === '/api/pledges') {
+    if (method === 'POST' && path === '/pledges') {
         const body = await getRequestBody(req);
         const shelter = shelters.find(s => s.id === parseInt(body.shelterId));
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
@@ -228,7 +232,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Fallback 404
-    return sendJSON(res, 404, { error: "Endpoint not found" });
+    return sendJSON(res, 404, { error: "Endpoint not found", path });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
