@@ -231,21 +231,47 @@ const server = http.createServer(async (req, res) => {
         const shelter = shelters.find(s => s.id === parseInt(body.shelterId));
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
 
+        let fulfillmentStatus = "pledged";
+        let remainingNeeded = 0;
+
         if (Array.isArray(body.items)) {
             body.items.forEach(item => {
-                if (item.type && item.qty > 0) {
+                const pledgedQty = parseInt(item.qty);
+                if (item.type && pledgedQty > 0) {
                     if (!shelter.inventory[item.type]) shelter.inventory[item.type] = 0;
-                    shelter.inventory[item.type] += parseInt(item.qty);
+                    shelter.inventory[item.type] += pledgedQty;
+
+                    // Partial vs Full Fulfillment Logic for matching supply requests
+                    if (body.requestId) {
+                        const reqId = parseInt(body.requestId);
+                        const targetReq = supplyRequests.find(r => r.id === reqId);
+
+                        if (targetReq && targetReq.type === item.type) {
+                            if (pledgedQty >= targetReq.qty) {
+                                // Full fulfillment -> Terminate request from feed completely
+                                supplyRequests = supplyRequests.filter(r => r.id !== reqId);
+                                fulfillmentStatus = "full";
+                                console.log(`[CLOUD SERVER] Request ${reqId} for ${shelter.name} FULLY FULFILLED and terminated!`);
+                            } else {
+                                // Partial fulfillment -> Subtract provided quantity
+                                targetReq.qty -= pledgedQty;
+                                remainingNeeded = targetReq.qty;
+                                fulfillmentStatus = "partial";
+                                console.log(`[CLOUD SERVER] Request ${reqId} PARTIALLY FULFILLED. Remaining needed: ${targetReq.qty} ${targetReq.type}`);
+                            }
+                        }
+                    }
                 }
             });
         }
 
-        if (body.requestId) {
-            supplyRequests = supplyRequests.filter(r => r.id !== parseInt(body.requestId));
-        }
-
-        console.log(`[CLOUD SERVER] NGO Pledge received for ${shelter.name}`);
-        return sendJSON(res, 200, { success: true, shelter });
+        return sendJSON(res, 200, {
+            success: true,
+            shelter,
+            requests: supplyRequests,
+            fulfillmentStatus,
+            remainingNeeded
+        });
     }
 
     // Fallback 404
