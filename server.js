@@ -36,15 +36,45 @@ const DEFAULT_SHELTERS = [
     }
 ];
 
+const DEFAULT_BULLETINS = [
+    {
+        id: 1,
+        title: "CYCLONE WATCH",
+        type: "red",
+        message: "Coastal gust winds reaching 85 km/h. Local shelters active in coastal zone.",
+        time: "10 mins ago",
+        timestamp: new Date().toISOString()
+    },
+    {
+        id: 2,
+        title: "FLOOD ALERT",
+        type: "yellow",
+        message: "River water levels rising near Sector 4. Kalinga Stadium camp open for relief.",
+        time: "25 mins ago",
+        timestamp: new Date().toISOString()
+    },
+    {
+        id: 3,
+        title: "NDRF HELPLINE",
+        type: "blue",
+        message: "NDRF rescue boats deployed. Call 1078 or broadcast SOS for immediate airlift.",
+        time: "1 hour ago",
+        timestamp: new Date().toISOString()
+    }
+];
+
 // --- ONLINE DATA STORE ---
 let shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
+let disasterBulletins = JSON.parse(JSON.stringify(DEFAULT_BULLETINS));
 let sosAlerts = [];
 let supplyRequests = [];
+let emergencyBroadcasts = [];
 
 const ROLE_PASSWORDS = {
     rescuer: "rescuer",
     manager: "shelter",
-    ngo: "NGO"
+    ngo: "NGO",
+    disaster: "disaster"
 };
 
 // Helper: Response Formatter with CORS
@@ -103,15 +133,19 @@ const server = http.createServer(async (req, res) => {
     // --- DATA RESET ENDPOINT ---
     if ((method === 'POST' || method === 'GET') && (path === '/reset' || path === '/admin/reset')) {
         shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
+        disasterBulletins = JSON.parse(JSON.stringify(DEFAULT_BULLETINS));
         sosAlerts = [];
         supplyRequests = [];
+        emergencyBroadcasts = [];
         console.log(`[CLOUD SERVER] 🔄 Database & Backend Saved Data Reset to Default Clean State!`);
         return sendJSON(res, 200, {
             success: true,
             message: "Backend data reset to default clean state successfully!",
             sheltersCount: shelters.length,
+            bulletinsCount: disasterBulletins.length,
             sosAlertsCount: 0,
-            supplyRequestsCount: 0
+            supplyRequestsCount: 0,
+            broadcastsCount: 0
         });
     }
 
@@ -123,6 +157,52 @@ const server = http.createServer(async (req, res) => {
             return sendJSON(res, 200, { success: true, role: body.role, token: `token-${body.role}-${Date.now()}` });
         }
         return sendJSON(res, 401, { success: false, error: "Incorrect password" });
+    }
+
+    // --- DISASTER BULLETINS API ---
+    if (method === 'GET' && path === '/bulletins') {
+        return sendJSON(res, 200, { success: true, bulletins: disasterBulletins });
+    }
+
+    if (method === 'POST' && path === '/bulletins') {
+        const body = await getRequestBody(req);
+        if (!body.title || !body.message) {
+            return sendJSON(res, 400, { success: false, error: "Title and message are required" });
+        }
+        const newBulletin = {
+            id: Date.now(),
+            title: body.title.toUpperCase(),
+            type: body.type || "red",
+            message: body.message,
+            time: "Just now",
+            timestamp: new Date().toISOString()
+        };
+        disasterBulletins.unshift(newBulletin);
+        console.log(`[CLOUD SERVER] 📢 Broadcasted Disaster Update: ${newBulletin.title}`);
+        return sendJSON(res, 201, { success: true, bulletin: newBulletin, bulletins: disasterBulletins });
+    }
+
+    // --- EMERGENCY SIREN BROADCAST API ---
+    if (method === 'GET' && path === '/broadcasts') {
+        return sendJSON(res, 200, { success: true, broadcasts: emergencyBroadcasts });
+    }
+
+    if (method === 'POST' && path === '/broadcasts') {
+        const body = await getRequestBody(req);
+        if (!body.title || !body.message) {
+            return sendJSON(res, 400, { success: false, error: "Title and message required" });
+        }
+        const newBroadcast = {
+            id: Date.now(),
+            targetArea: (body.targetArea || "ALL").trim(),
+            title: body.title,
+            message: body.message,
+            severity: body.severity || "CRITICAL",
+            timestamp: new Date().toISOString()
+        };
+        emergencyBroadcasts.unshift(newBroadcast);
+        console.log(`[CLOUD SERVER] 🚨 EMERGENCY SIREN BROADCAST SENT to Area [${newBroadcast.targetArea}]: ${newBroadcast.title}`);
+        return sendJSON(res, 201, { success: true, broadcast: newBroadcast, broadcasts: emergencyBroadcasts });
     }
 
     // --- SHELTERS API ---
@@ -241,19 +321,16 @@ const server = http.createServer(async (req, res) => {
                     if (!shelter.inventory[item.type]) shelter.inventory[item.type] = 0;
                     shelter.inventory[item.type] += pledgedQty;
 
-                    // Partial vs Full Fulfillment Logic for matching supply requests
                     if (body.requestId) {
                         const reqId = parseInt(body.requestId);
                         const targetReq = supplyRequests.find(r => r.id === reqId);
 
                         if (targetReq && targetReq.type === item.type) {
                             if (pledgedQty >= targetReq.qty) {
-                                // Full fulfillment -> Terminate request from feed completely
                                 supplyRequests = supplyRequests.filter(r => r.id !== reqId);
                                 fulfillmentStatus = "full";
                                 console.log(`[CLOUD SERVER] Request ${reqId} for ${shelter.name} FULLY FULFILLED and terminated!`);
                             } else {
-                                // Partial fulfillment -> Subtract provided quantity
                                 targetReq.qty -= pledgedQty;
                                 remainingNeeded = targetReq.qty;
                                 fulfillmentStatus = "partial";
