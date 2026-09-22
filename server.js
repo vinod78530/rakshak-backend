@@ -456,8 +456,11 @@ const server = http.createServer(async (req, res) => {
         const body = await getRequestBody(req);
         const newAlert = {
             id: body.id || Date.now(),
+            alertId: body.alertId || ("sos_" + Date.now()),
+            displayName: body.displayName || "Citizen in Distress",
             lat: parseFloat(body.lat) || 20.2961,
             lng: parseFloat(body.lng) || 85.8245,
+            accuracy: parseFloat(body.accuracy) || 10.0,
             contact: body.contact || "Citizen in Distress",
             time: body.time || new Date().toLocaleTimeString(),
             status: body.status || "pending",
@@ -466,6 +469,7 @@ const server = http.createServer(async (req, res) => {
             isMesh: !!body.isMesh,
             hopCount: body.hopCount || 0,
             relayPath: body.relayPath || [],
+            source: body.source || (body.isMesh ? 'mesh' : 'cloud'),
             timestamp: body.timestamp || new Date().toISOString()
         };
         sosAlerts = sosAlerts.filter(a => String(a.id) !== String(newAlert.id));
