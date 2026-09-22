@@ -384,6 +384,13 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { success: true, alerts: sosAlerts });
     }
 
+    if ((method === 'DELETE' || method === 'POST') && (path === '/sos/clear' || (method === 'DELETE' && path === '/sos'))) {
+        sosAlerts = [];
+        console.log(`[CLOUD SERVER] 🧹 Cleared all SOS alerts. Active alerts count: 0`);
+        notifySseClients('sos_cleared', {});
+        return sendJSON(res, 200, { success: true, message: "All SOS alerts cleared successfully", alerts: [] });
+    }
+
     if (method === 'POST' && path === '/sos') {
         const body = await getRequestBody(req);
         const newAlert = {
