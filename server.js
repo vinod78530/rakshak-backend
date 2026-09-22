@@ -1,6 +1,10 @@
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 5000;
+const DATA_DIR = path.join(__dirname, 'data');
+const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 // --- INITIAL DEFAULT DATA SET ---
 const DEFAULT_SHELTERS = [
@@ -46,6 +50,53 @@ let sosAlerts = [];
 let supplyRequests = [];
 let emergencyBroadcasts = [];
 let activeEmergencyAlert = null;
+
+// Persistent File Storage Engine
+function ensureDataDir() {
+    if (!fs.existsSync(DATA_DIR)) {
+        try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
+    }
+}
+
+function loadDatabase() {
+    ensureDataDir();
+    if (fs.existsSync(DB_FILE)) {
+        try {
+            const raw = fs.readFileSync(DB_FILE, 'utf8');
+            const data = JSON.parse(raw);
+            if (Array.isArray(data.shelters) && data.shelters.length > 0) shelters = data.shelters;
+            if (Array.isArray(data.disasterBulletins)) disasterBulletins = data.disasterBulletins;
+            if (Array.isArray(data.sosAlerts)) sosAlerts = data.sosAlerts;
+            if (Array.isArray(data.supplyRequests)) supplyRequests = data.supplyRequests;
+            if (Array.isArray(data.emergencyBroadcasts)) emergencyBroadcasts = data.emergencyBroadcasts;
+            if (data.activeEmergencyAlert !== undefined) activeEmergencyAlert = data.activeEmergencyAlert;
+            console.log('[CLOUD STORAGE] Persistent JSON storage loaded from data/db.json');
+        } catch (e) {
+            console.warn('[CLOUD STORAGE] Error loading db.json, using defaults', e);
+        }
+    }
+}
+
+function saveDatabase() {
+    ensureDataDir();
+    try {
+        const payload = {
+            shelters,
+            disasterBulletins,
+            sosAlerts,
+            supplyRequests,
+            emergencyBroadcasts,
+            activeEmergencyAlert,
+            updatedAt: new Date().toISOString()
+        };
+        fs.writeFileSync(DB_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    } catch (e) {
+        console.warn('[CLOUD STORAGE] Error saving to db.json', e);
+    }
+}
+
+// Load persisted records on startup
+loadDatabase();
 
 // Real-time SSE Clients
 const sseClients = new Set();
@@ -216,6 +267,7 @@ const server = http.createServer(async (req, res) => {
         // Upsert by ID to avoid duplicates
         disasterBulletins = disasterBulletins.filter(b => String(b.id) !== String(newBulletin.id));
         disasterBulletins.unshift(newBulletin);
+        saveDatabase();
 
         console.log(`[CLOUD SERVER] 📢 Disaster Bulletin Published: [${newBulletin.severity}] ${newBulletin.title}`);
         notifySseClients('bulletin_new', newBulletin);
@@ -227,6 +279,7 @@ const server = http.createServer(async (req, res) => {
         const idx = disasterBulletins.findIndex(b => String(b.id) === String(id));
         if (idx !== -1) {
             const removed = disasterBulletins.splice(idx, 1)[0];
+            saveDatabase();
             console.log(`[CLOUD SERVER] 🗑️ Removed Disaster Bulletin: ${removed.title}`);
             notifySseClients('bulletin_deleted', { id: removed.id });
             return sendJSON(res, 200, { success: true, message: "Bulletin deleted", deletedId: id, bulletins: disasterBulletins });
@@ -254,6 +307,7 @@ const server = http.createServer(async (req, res) => {
         if (activeEmergencyAlert) {
             const cancelled = { ...activeEmergencyAlert, active: false };
             activeEmergencyAlert = null;
+            saveDatabase();
             console.log(`[CLOUD SERVER] 🔕 Emergency Broadcast CANCELLED: ${cancelled.title}`);
             notifySseClients('emergency_cancelled', { id: cancelled.id });
             return sendJSON(res, 200, {
@@ -269,6 +323,7 @@ const server = http.createServer(async (req, res) => {
         if (activeEmergencyAlert) {
             const cancelled = { ...activeEmergencyAlert, active: false };
             activeEmergencyAlert = null;
+            saveDatabase();
             notifySseClients('emergency_cancelled', { id: cancelled.id });
             return sendJSON(res, 200, { success: true, message: "Active emergency alert deactivated", activeAlert: null });
         }
@@ -314,6 +369,7 @@ const server = http.createServer(async (req, res) => {
         };
         disasterBulletins = disasterBulletins.filter(b => String(b.id) !== String(mirrorBulletin.id));
         disasterBulletins.unshift(mirrorBulletin);
+        saveDatabase();
 
         console.log(`[CLOUD SERVER] 🚨 EMERGENCY SIREN BROADCAST ACTIVATED: ${newBroadcast.title} [${newBroadcast.targetArea}]`);
         notifySseClients('emergency_broadcast', newBroadcast);
@@ -350,6 +406,7 @@ const server = http.createServer(async (req, res) => {
         };
         shelters = shelters.filter(s => s.id !== newShelter.id);
         shelters.push(newShelter);
+        saveDatabase();
         console.log(`[CLOUD SERVER] Registered Shelter: ${newShelter.name}`);
         notifySseClients('shelter_update', { shelter: newShelter });
         return sendJSON(res, 201, { success: true, shelter: newShelter });
@@ -363,6 +420,7 @@ const server = http.createServer(async (req, res) => {
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
 
         shelter.current = parseInt(body.current);
+        saveDatabase();
         console.log(`[CLOUD SERVER] Updated Occupancy: ${shelter.name} -> ${shelter.current}/${shelter.capacity}`);
         notifySseClients('shelter_occupancy', { id: shelter.id, current: shelter.current });
         return sendJSON(res, 200, { success: true, shelter });
@@ -374,6 +432,7 @@ const server = http.createServer(async (req, res) => {
         if (idx === -1) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
 
         const deleted = shelters.splice(idx, 1)[0];
+        saveDatabase();
         console.log(`[CLOUD SERVER] Deleted Shelter: ${deleted.name}`);
         notifySseClients('shelter_deleted', { id });
         return sendJSON(res, 200, { success: true, message: `Shelter "${deleted.name}" deleted`, deletedId: id });
@@ -386,6 +445,7 @@ const server = http.createServer(async (req, res) => {
 
     if ((method === 'DELETE' || method === 'POST') && (path === '/sos/clear' || (method === 'DELETE' && path === '/sos'))) {
         sosAlerts = [];
+        saveDatabase();
         console.log(`[CLOUD SERVER] 🧹 Cleared all SOS alerts. Active alerts count: 0`);
         notifySseClients('sos_cleared', {});
         return sendJSON(res, 200, { success: true, message: "All SOS alerts cleared successfully", alerts: [] });
@@ -409,6 +469,7 @@ const server = http.createServer(async (req, res) => {
         };
         sosAlerts = sosAlerts.filter(a => String(a.id) !== String(newAlert.id));
         sosAlerts.unshift(newAlert);
+        saveDatabase();
         console.log(`[CLOUD SERVER] 🚨 SOS Alert Triggered! Lat: ${newAlert.lat}, Lng: ${newAlert.lng}, Contact: ${newAlert.contact}`);
         notifySseClients('sos_new', newAlert);
         return sendJSON(res, 201, { success: true, alert: newAlert });
@@ -421,6 +482,7 @@ const server = http.createServer(async (req, res) => {
         if (!alert) return sendJSON(res, 404, { success: false, error: "Alert not found" });
 
         alert.status = body.status;
+        saveDatabase();
         console.log(`[CLOUD SERVER] Updated SOS ${id} status to ${body.status}`);
         notifySseClients('sos_status', { id, status: body.status });
         return sendJSON(res, 200, { success: true, alert });
@@ -444,6 +506,7 @@ const server = http.createServer(async (req, res) => {
             qty: parseInt(body.qty)
         };
         supplyRequests.unshift(newReq);
+        saveDatabase();
         console.log(`[CLOUD SERVER] Broadcasted Supply Request: ${shelter.name} needs ${newReq.qty} ${newReq.type}`);
         notifySseClients('request_new', newReq);
         return sendJSON(res, 201, { success: true, request: newReq });
@@ -486,6 +549,7 @@ const server = http.createServer(async (req, res) => {
             });
         }
 
+        saveDatabase();
         notifySseClients('pledge_fulfilled', { shelter, requests: supplyRequests });
         return sendJSON(res, 200, {
             success: true,
