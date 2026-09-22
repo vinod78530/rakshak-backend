@@ -36,32 +36,8 @@ const DEFAULT_SHELTERS = [
     }
 ];
 
-const DEFAULT_BULLETINS = [
-    {
-        id: 1,
-        title: "CYCLONE WATCH",
-        type: "red",
-        message: "Coastal gust winds reaching 85 km/h. Local shelters active in coastal zone.",
-        time: "10 mins ago",
-        timestamp: new Date().toISOString()
-    },
-    {
-        id: 2,
-        title: "FLOOD ALERT",
-        type: "yellow",
-        message: "River water levels rising near Sector 4. Kalinga Stadium camp open for relief.",
-        time: "25 mins ago",
-        timestamp: new Date().toISOString()
-    },
-    {
-        id: 3,
-        title: "NDRF HELPLINE",
-        type: "blue",
-        message: "NDRF rescue boats deployed. Call 1078 or broadcast SOS for immediate airlift.",
-        time: "1 hour ago",
-        timestamp: new Date().toISOString()
-    }
-];
+// Default disaster bulletins start empty so no dummy data is shown to citizens
+const DEFAULT_BULLETINS = [];
 
 // --- ONLINE DATA STORE ---
 let shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
@@ -69,12 +45,28 @@ let disasterBulletins = JSON.parse(JSON.stringify(DEFAULT_BULLETINS));
 let sosAlerts = [];
 let supplyRequests = [];
 let emergencyBroadcasts = [];
+let activeEmergencyAlert = null;
+
+// Real-time SSE Clients
+const sseClients = new Set();
+
+function notifySseClients(eventType, data) {
+    const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of sseClients) {
+        try {
+            client.write(payload);
+        } catch (e) {
+            sseClients.delete(client);
+        }
+    }
+}
 
 const ROLE_PASSWORDS = {
     rescuer: "rescuer",
     manager: "shelter",
     ngo: "NGO",
-    disaster: "disaster"
+    disaster: "disaster",
+    disaster_mgmt: "disaster"
 };
 
 // Helper: Response Formatter with CORS
@@ -126,26 +118,54 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, {
             status: "OK",
             server: "Rakshak Online Cloud Server",
+            activeEmergencyAlert: activeEmergencyAlert ? activeEmergencyAlert.title : null,
+            bulletinsCount: disasterBulletins.length,
             timestamp: new Date().toISOString()
         });
+    }
+
+    // --- REAL-TIME SERVER-SENT EVENTS (SSE) STREAM ---
+    if (method === 'GET' && (path === '/events' || path === '/stream')) {
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*'
+        });
+        // Send initial connection heartbeat & current active alert status
+        res.write(`event: connected\ndata: ${JSON.stringify({
+            connected: true,
+            activeAlert: activeEmergencyAlert,
+            bulletinsCount: disasterBulletins.length,
+            timestamp: new Date().toISOString()
+        })}\n\n`);
+
+        sseClients.add(res);
+        req.on('close', () => {
+            sseClients.delete(res);
+        });
+        return;
     }
 
     // --- DATA RESET ENDPOINT ---
     if ((method === 'POST' || method === 'GET') && (path === '/reset' || path === '/admin/reset')) {
         shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
-        disasterBulletins = JSON.parse(JSON.stringify(DEFAULT_BULLETINS));
+        disasterBulletins = [];
         sosAlerts = [];
         supplyRequests = [];
         emergencyBroadcasts = [];
-        console.log(`[CLOUD SERVER] 🔄 Database & Backend Saved Data Reset to Default Clean State!`);
+        activeEmergencyAlert = null;
+        notifySseClients('system_reset', { reset: true });
+        console.log(`[CLOUD SERVER] 🔄 Database & Backend Data Reset to Default Clean State!`);
         return sendJSON(res, 200, {
             success: true,
-            message: "Backend data reset to default clean state successfully!",
+            message: "Backend data reset to clean state successfully!",
             sheltersCount: shelters.length,
-            bulletinsCount: disasterBulletins.length,
+            bulletinsCount: 0,
             sosAlertsCount: 0,
             supplyRequestsCount: 0,
-            broadcastsCount: 0
+            broadcastsCount: 0,
+            activeEmergencyAlert: null
         });
     }
 
@@ -161,48 +181,145 @@ const server = http.createServer(async (req, res) => {
 
     // --- DISASTER BULLETINS API ---
     if (method === 'GET' && path === '/bulletins') {
-        return sendJSON(res, 200, { success: true, bulletins: disasterBulletins });
+        return sendJSON(res, 200, {
+            success: true,
+            count: disasterBulletins.length,
+            bulletins: disasterBulletins
+        });
     }
 
     if (method === 'POST' && path === '/bulletins') {
         const body = await getRequestBody(req);
-        if (!body.title || !body.message) {
-            return sendJSON(res, 400, { success: false, error: "Title and message are required" });
+        const title = (body.title || "").trim();
+        const content = (body.content || body.message || body.description || "").trim();
+        if (!title || !content) {
+            return sendJSON(res, 400, { success: false, error: "Title and content are required" });
         }
+        const now = new Date();
         const newBulletin = {
-            id: Date.now(),
-            title: body.title.toUpperCase(),
-            type: body.type || "red",
-            message: body.message,
-            time: "Just now",
-            timestamp: new Date().toISOString()
+            id: body.id ? String(body.id) : ('bulletin_' + Date.now()),
+            title: title,
+            severity: (body.severity || body.type || "WARNING").toUpperCase(),
+            region: (body.region || "All Sectors").trim(),
+            content: content,
+            timestamp: body.timestamp || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            date: body.date || now.toLocaleDateString(),
+            createdAt: new Date().toISOString()
         };
+
+        // Upsert by ID to avoid duplicates
+        disasterBulletins = disasterBulletins.filter(b => String(b.id) !== String(newBulletin.id));
         disasterBulletins.unshift(newBulletin);
-        console.log(`[CLOUD SERVER] 📢 Broadcasted Disaster Update: ${newBulletin.title}`);
+
+        console.log(`[CLOUD SERVER] 📢 Disaster Bulletin Published: [${newBulletin.severity}] ${newBulletin.title}`);
+        notifySseClients('bulletin_new', newBulletin);
         return sendJSON(res, 201, { success: true, bulletin: newBulletin, bulletins: disasterBulletins });
     }
 
+    if (method === 'DELETE' && path.startsWith('/bulletins/')) {
+        const id = path.split('/')[2];
+        const idx = disasterBulletins.findIndex(b => String(b.id) === String(id));
+        if (idx !== -1) {
+            const removed = disasterBulletins.splice(idx, 1)[0];
+            console.log(`[CLOUD SERVER] 🗑️ Removed Disaster Bulletin: ${removed.title}`);
+            notifySseClients('bulletin_deleted', { id: removed.id });
+            return sendJSON(res, 200, { success: true, message: "Bulletin deleted", deletedId: id, bulletins: disasterBulletins });
+        }
+        return sendJSON(res, 404, { success: false, error: "Bulletin not found" });
+    }
+
     // --- EMERGENCY SIREN BROADCAST API ---
+    if (method === 'GET' && path === '/broadcasts/active') {
+        return sendJSON(res, 200, {
+            success: true,
+            activeAlert: activeEmergencyAlert
+        });
+    }
+
     if (method === 'GET' && path === '/broadcasts') {
-        return sendJSON(res, 200, { success: true, broadcasts: emergencyBroadcasts });
+        return sendJSON(res, 200, {
+            success: true,
+            activeAlert: activeEmergencyAlert,
+            broadcasts: emergencyBroadcasts
+        });
+    }
+
+    if (method === 'POST' && (path === '/broadcasts/cancel' || path === '/broadcasts/deactivate')) {
+        if (activeEmergencyAlert) {
+            const cancelled = { ...activeEmergencyAlert, active: false };
+            activeEmergencyAlert = null;
+            console.log(`[CLOUD SERVER] 🔕 Emergency Broadcast CANCELLED: ${cancelled.title}`);
+            notifySseClients('emergency_cancelled', { id: cancelled.id });
+            return sendJSON(res, 200, {
+                success: true,
+                message: "Emergency siren broadcast deactivated.",
+                activeAlert: null
+            });
+        }
+        return sendJSON(res, 200, { success: true, message: "No active broadcast to cancel", activeAlert: null });
+    }
+
+    if (method === 'DELETE' && (path === '/broadcasts/active' || path === '/broadcasts')) {
+        if (activeEmergencyAlert) {
+            const cancelled = { ...activeEmergencyAlert, active: false };
+            activeEmergencyAlert = null;
+            notifySseClients('emergency_cancelled', { id: cancelled.id });
+            return sendJSON(res, 200, { success: true, message: "Active emergency alert deactivated", activeAlert: null });
+        }
+        return sendJSON(res, 200, { success: true, message: "No active emergency alert", activeAlert: null });
     }
 
     if (method === 'POST' && path === '/broadcasts') {
         const body = await getRequestBody(req);
-        if (!body.title || !body.message) {
-            return sendJSON(res, 400, { success: false, error: "Title and message required" });
+        const title = (body.title || "").trim();
+        const desc = (body.description || body.message || body.desc || body.content || "").trim();
+        if (!title || !desc) {
+            return sendJSON(res, 400, { success: false, error: "Title and description/message are required" });
         }
+        const now = new Date();
         const newBroadcast = {
-            id: Date.now(),
-            targetArea: (body.targetArea || "ALL").trim(),
-            title: body.title,
-            message: body.message,
-            severity: body.severity || "CRITICAL",
-            timestamp: new Date().toISOString()
+            id: body.id ? String(body.id) : ('emergency_' + Date.now()),
+            title: title,
+            description: desc,
+            issuer: (body.issuer || body.sender || "Disaster Management Authority").trim(),
+            severity: (body.severity || "CRITICAL").toUpperCase(),
+            targetArea: (body.targetArea || body.region || "ALL SECTORS / STATEWIDE").trim(),
+            timestamp: body.timestamp || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            date: body.date || now.toLocaleDateString(),
+            active: true,
+            createdAt: new Date().toISOString()
         };
+
+        activeEmergencyAlert = newBroadcast;
+        emergencyBroadcasts = emergencyBroadcasts.filter(b => String(b.id) !== String(newBroadcast.id));
         emergencyBroadcasts.unshift(newBroadcast);
-        console.log(`[CLOUD SERVER] 🚨 EMERGENCY SIREN BROADCAST SENT to Area [${newBroadcast.targetArea}]: ${newBroadcast.title}`);
-        return sendJSON(res, 201, { success: true, broadcast: newBroadcast, broadcasts: emergencyBroadcasts });
+        if (emergencyBroadcasts.length > 50) emergencyBroadcasts.pop();
+
+        // Also mirror into disaster bulletins feed so citizens see it in their live updates feed
+        const mirrorBulletin = {
+            id: 'bulletin_' + newBroadcast.id,
+            title: `🚨 ${newBroadcast.title}`,
+            severity: 'CRITICAL',
+            region: newBroadcast.targetArea || 'ALL SECTORS / STATEWIDE',
+            content: `${newBroadcast.description} [Issued by ${newBroadcast.issuer}]`,
+            timestamp: newBroadcast.timestamp,
+            date: newBroadcast.date,
+            createdAt: newBroadcast.createdAt
+        };
+        disasterBulletins = disasterBulletins.filter(b => String(b.id) !== String(mirrorBulletin.id));
+        disasterBulletins.unshift(mirrorBulletin);
+
+        console.log(`[CLOUD SERVER] 🚨 EMERGENCY SIREN BROADCAST ACTIVATED: ${newBroadcast.title} [${newBroadcast.targetArea}]`);
+        notifySseClients('emergency_broadcast', newBroadcast);
+        notifySseClients('bulletin_new', mirrorBulletin);
+
+        return sendJSON(res, 201, {
+            success: true,
+            activeAlert: activeEmergencyAlert,
+            broadcast: newBroadcast,
+            bulletin: mirrorBulletin,
+            broadcasts: emergencyBroadcasts
+        });
     }
 
     // --- SHELTERS API ---
@@ -216,17 +333,19 @@ const server = http.createServer(async (req, res) => {
             return sendJSON(res, 400, { success: false, error: "Name and capacity are required" });
         }
         const newShelter = {
-            id: Date.now(),
+            id: body.id ? parseInt(body.id) : Date.now(),
             name: body.name,
             lat: parseFloat(body.lat) || 20.2961,
             lng: parseFloat(body.lng) || 85.8245,
             capacity: parseInt(body.capacity),
-            current: 0,
+            current: parseInt(body.current) || 0,
             phone: body.phone || "",
-            inventory: {}
+            inventory: body.inventory || {}
         };
+        shelters = shelters.filter(s => s.id !== newShelter.id);
         shelters.push(newShelter);
         console.log(`[CLOUD SERVER] Registered Shelter: ${newShelter.name}`);
+        notifySseClients('shelter_update', { shelter: newShelter });
         return sendJSON(res, 201, { success: true, shelter: newShelter });
     }
 
@@ -239,6 +358,7 @@ const server = http.createServer(async (req, res) => {
 
         shelter.current = parseInt(body.current);
         console.log(`[CLOUD SERVER] Updated Occupancy: ${shelter.name} -> ${shelter.current}/${shelter.capacity}`);
+        notifySseClients('shelter_occupancy', { id: shelter.id, current: shelter.current });
         return sendJSON(res, 200, { success: true, shelter });
     }
 
@@ -249,6 +369,7 @@ const server = http.createServer(async (req, res) => {
 
         const deleted = shelters.splice(idx, 1)[0];
         console.log(`[CLOUD SERVER] Deleted Shelter: ${deleted.name}`);
+        notifySseClients('shelter_deleted', { id });
         return sendJSON(res, 200, { success: true, message: `Shelter "${deleted.name}" deleted`, deletedId: id });
     }
 
@@ -260,27 +381,35 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && path === '/sos') {
         const body = await getRequestBody(req);
         const newAlert = {
-            id: Date.now(),
+            id: body.id || Date.now(),
             lat: parseFloat(body.lat) || 20.2961,
             lng: parseFloat(body.lng) || 85.8245,
-            contact: body.contact || "No contact provided",
-            time: new Date().toLocaleTimeString(),
-            status: "pending",
-            timestamp: new Date().toISOString()
+            contact: body.contact || "Citizen in Distress",
+            time: body.time || new Date().toLocaleTimeString(),
+            status: body.status || "pending",
+            message: body.message || "",
+            medicalNotes: body.medicalNotes || "",
+            isMesh: !!body.isMesh,
+            hopCount: body.hopCount || 0,
+            relayPath: body.relayPath || [],
+            timestamp: body.timestamp || new Date().toISOString()
         };
-        sosAlerts.push(newAlert);
+        sosAlerts = sosAlerts.filter(a => String(a.id) !== String(newAlert.id));
+        sosAlerts.unshift(newAlert);
         console.log(`[CLOUD SERVER] 🚨 SOS Alert Triggered! Lat: ${newAlert.lat}, Lng: ${newAlert.lng}, Contact: ${newAlert.contact}`);
+        notifySseClients('sos_new', newAlert);
         return sendJSON(res, 201, { success: true, alert: newAlert });
     }
 
     if (method === 'PUT' && path.startsWith('/sos/') && path.endsWith('/status')) {
-        const id = parseInt(path.split('/')[2]);
+        const id = path.split('/')[2];
         const body = await getRequestBody(req);
-        const alert = sosAlerts.find(a => a.id === id);
+        const alert = sosAlerts.find(a => String(a.id) === String(id));
         if (!alert) return sendJSON(res, 404, { success: false, error: "Alert not found" });
 
         alert.status = body.status;
         console.log(`[CLOUD SERVER] Updated SOS ${id} status to ${body.status}`);
+        notifySseClients('sos_status', { id, status: body.status });
         return sendJSON(res, 200, { success: true, alert });
     }
 
@@ -295,14 +424,15 @@ const server = http.createServer(async (req, res) => {
         if (!shelter) return sendJSON(res, 404, { success: false, error: "Shelter not found" });
 
         const newReq = {
-            id: Date.now(),
+            id: body.id ? parseInt(body.id) : Date.now(),
             shelterId: shelter.id,
             shelterName: shelter.name,
             type: body.type,
             qty: parseInt(body.qty)
         };
-        supplyRequests.push(newReq);
+        supplyRequests.unshift(newReq);
         console.log(`[CLOUD SERVER] Broadcasted Supply Request: ${shelter.name} needs ${newReq.qty} ${newReq.type}`);
+        notifySseClients('request_new', newReq);
         return sendJSON(res, 201, { success: true, request: newReq });
     }
 
@@ -318,6 +448,7 @@ const server = http.createServer(async (req, res) => {
             body.items.forEach(item => {
                 const pledgedQty = parseInt(item.qty);
                 if (item.type && pledgedQty > 0) {
+                    if (!shelter.inventory) shelter.inventory = {};
                     if (!shelter.inventory[item.type]) shelter.inventory[item.type] = 0;
                     shelter.inventory[item.type] += pledgedQty;
 
@@ -329,7 +460,7 @@ const server = http.createServer(async (req, res) => {
                             if (pledgedQty >= targetReq.qty) {
                                 supplyRequests = supplyRequests.filter(r => r.id !== reqId);
                                 fulfillmentStatus = "full";
-                                console.log(`[CLOUD SERVER] Request ${reqId} for ${shelter.name} FULLY FULFILLED and terminated!`);
+                                console.log(`[CLOUD SERVER] Request ${reqId} for ${shelter.name} FULLY FULFILLED!`);
                             } else {
                                 targetReq.qty -= pledgedQty;
                                 remainingNeeded = targetReq.qty;
@@ -342,6 +473,7 @@ const server = http.createServer(async (req, res) => {
             });
         }
 
+        notifySseClients('pledge_fulfilled', { shelter, requests: supplyRequests });
         return sendJSON(res, 200, {
             success: true,
             shelter,
@@ -359,5 +491,8 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`===================================================`);
     console.log(`🚀 Rakshak Cloud Online Server running on Port ${PORT}`);
     console.log(`📡 Health Check: http://localhost:${PORT}/api/health`);
+    console.log(`📢 Disaster Bulletins: http://localhost:${PORT}/api/bulletins`);
+    console.log(`🚨 Emergency Broadcast: http://localhost:${PORT}/api/broadcasts`);
+    console.log(`⚡ Live Event Stream (SSE): http://localhost:${PORT}/api/events`);
     console.log(`===================================================`);
 });
