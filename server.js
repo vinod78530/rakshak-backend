@@ -206,6 +206,7 @@ const server = http.createServer(async (req, res) => {
         supplyRequests = [];
         emergencyBroadcasts = [];
         activeEmergencyAlert = null;
+        saveDatabase();
         notifySseClients('system_reset', { reset: true });
         console.log(`[CLOUD SERVER] 🔄 Database & Backend Data Reset to Default Clean State!`);
         return sendJSON(res, 200, {
