@@ -62,11 +62,11 @@ function notifySseClients(eventType, data) {
 }
 
 const ROLE_PASSWORDS = {
-    rescuer: "rescuer",
-    manager: "shelter",
-    ngo: "NGO",
-    disaster: "disaster",
-    disaster_mgmt: "disaster"
+    rescuer: ["rescuer", "res@123", "rescue", "rescuer123"],
+    manager: ["shelter", "mgr@123", "manager", "shelter123"],
+    ngo: ["ngo", "ngo123", "donor"],
+    disaster: ["disaster", "gov@123", "admin", "disaster123"],
+    disaster_mgmt: ["disaster", "gov@123", "admin", "disaster123", "dm"]
 };
 
 // Helper: Response Formatter with CORS
@@ -172,9 +172,15 @@ const server = http.createServer(async (req, res) => {
     // --- ROLE AUTHENTICATION ---
     if (method === 'POST' && path === '/auth/verify-role') {
         const body = await getRequestBody(req);
-        const expected = ROLE_PASSWORDS[body.role];
-        if (expected && body.password === expected) {
-            return sendJSON(res, 200, { success: true, role: body.role, token: `token-${body.role}-${Date.now()}` });
+        const role = (body.role || "").trim();
+        const pwd = (body.password || "").trim().toLowerCase();
+        const expected = ROLE_PASSWORDS[role];
+        const isMatch = Array.isArray(expected)
+            ? expected.map(p => p.toLowerCase()).includes(pwd)
+            : (expected && expected.toLowerCase() === pwd);
+
+        if (isMatch) {
+            return sendJSON(res, 200, { success: true, role: role, token: `token-${role}-${Date.now()}` });
         }
         return sendJSON(res, 401, { success: false, error: "Incorrect password" });
     }
