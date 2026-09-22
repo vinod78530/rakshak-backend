@@ -40,11 +40,43 @@ const DEFAULT_SHELTERS = [
     }
 ];
 
+// Default rescue stations
+const DEFAULT_RESCUE_STATIONS = [
+    {
+        id: "station_1",
+        name: "ODRAF Disaster Response HQ",
+        phone: "0674-2534101",
+        lat: 20.2980,
+        lng: 85.8350,
+        type: "ODRAF",
+        activeRescuers: []
+    },
+    {
+        id: "station_2",
+        name: "Central Fire & Emergency Station",
+        phone: "0674-2402101",
+        lat: 20.2850,
+        lng: 85.8150,
+        type: "Fire & Rescue",
+        activeRescuers: []
+    },
+    {
+        id: "station_3",
+        name: "NDRF Regional Response Centre",
+        phone: "0674-2550101",
+        lat: 20.3400,
+        lng: 85.8200,
+        type: "NDRF",
+        activeRescuers: []
+    }
+];
+
 // Default disaster bulletins start empty so no dummy data is shown to citizens
 const DEFAULT_BULLETINS = [];
 
 // --- ONLINE DATA STORE ---
 let shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
+let rescueStations = JSON.parse(JSON.stringify(DEFAULT_RESCUE_STATIONS));
 let disasterBulletins = JSON.parse(JSON.stringify(DEFAULT_BULLETINS));
 let sosAlerts = [];
 let supplyRequests = [];
@@ -65,6 +97,7 @@ function loadDatabase() {
             const raw = fs.readFileSync(DB_FILE, 'utf8');
             const data = JSON.parse(raw);
             if (Array.isArray(data.shelters) && data.shelters.length > 0) shelters = data.shelters;
+            if (Array.isArray(data.rescueStations) && data.rescueStations.length > 0) rescueStations = data.rescueStations;
             if (Array.isArray(data.disasterBulletins)) disasterBulletins = data.disasterBulletins;
             if (Array.isArray(data.sosAlerts)) sosAlerts = data.sosAlerts;
             if (Array.isArray(data.supplyRequests)) supplyRequests = data.supplyRequests;
@@ -82,6 +115,7 @@ function saveDatabase() {
     try {
         const payload = {
             shelters,
+            rescueStations,
             disasterBulletins,
             sosAlerts,
             supplyRequests,
@@ -146,6 +180,31 @@ function getRequestBody(req) {
     });
 }
 
+// Helper: Calculate Haversine distance in km between two GPS coordinates
+function calculateHaversineKm(lat1, lon1, lat2, lon2) {
+    if (!lat1 || !lon1 || !lat2 || !lon2) return 999999;
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return Math.round(R * c * 10) / 10;
+}
+
+// Helper: Identify the nearest N rescue stations from a given location
+function getNearestRescueStations(lat, lng, maxCount = 3) {
+    if (!rescueStations || rescueStations.length === 0) return [];
+    const mapped = rescueStations.map(st => ({
+        id: String(st.id),
+        name: st.name,
+        phone: st.phone,
+        distanceKm: calculateHaversineKm(lat, lng, st.lat, st.lng)
+    })).sort((a, b) => a.distanceKm - b.distanceKm);
+    return mapped.slice(0, maxCount);
+}
+
 const server = http.createServer(async (req, res) => {
     // Handle CORS Preflight
     if (req.method === 'OPTIONS') {
@@ -171,6 +230,7 @@ const server = http.createServer(async (req, res) => {
             server: "Rakshak Online Cloud Server",
             activeEmergencyAlert: activeEmergencyAlert ? activeEmergencyAlert.title : null,
             bulletinsCount: disasterBulletins.length,
+            stationsCount: rescueStations.length,
             timestamp: new Date().toISOString()
         });
     }
@@ -188,6 +248,7 @@ const server = http.createServer(async (req, res) => {
             connected: true,
             activeAlert: activeEmergencyAlert,
             bulletinsCount: disasterBulletins.length,
+            stationsCount: rescueStations.length,
             timestamp: new Date().toISOString()
         })}\n\n`);
 
@@ -201,6 +262,7 @@ const server = http.createServer(async (req, res) => {
     // --- DATA RESET ENDPOINT ---
     if ((method === 'POST' || method === 'GET') && (path === '/reset' || path === '/admin/reset')) {
         shelters = JSON.parse(JSON.stringify(DEFAULT_SHELTERS));
+        rescueStations = JSON.parse(JSON.stringify(DEFAULT_RESCUE_STATIONS));
         disasterBulletins = [];
         sosAlerts = [];
         supplyRequests = [];
@@ -208,11 +270,13 @@ const server = http.createServer(async (req, res) => {
         activeEmergencyAlert = null;
         saveDatabase();
         notifySseClients('system_reset', { reset: true });
+        notifySseClients('station_reset', { stations: rescueStations });
         console.log(`[CLOUD SERVER] 🔄 Database & Backend Data Reset to Default Clean State!`);
         return sendJSON(res, 200, {
             success: true,
             message: "Backend data reset to clean state successfully!",
             sheltersCount: shelters.length,
+            stationsCount: rescueStations.length,
             bulletinsCount: 0,
             sosAlertsCount: 0,
             supplyRequestsCount: 0,
@@ -439,6 +503,48 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { success: true, message: `Shelter "${deleted.name}" deleted`, deletedId: id });
     }
 
+    // --- RESCUE STATIONS API ---
+    if (method === 'GET' && path === '/stations') {
+        return sendJSON(res, 200, { success: true, count: rescueStations.length, stations: rescueStations });
+    }
+
+    if (method === 'POST' && path === '/stations') {
+        const body = await getRequestBody(req);
+        const name = (body.name || "").trim();
+        if (!name) {
+            return sendJSON(res, 400, { success: false, error: "Station name is required" });
+        }
+        const newStation = {
+            id: body.id ? String(body.id) : ('station_' + Date.now()),
+            name: name,
+            phone: (body.phone || "").trim(),
+            lat: parseFloat(body.lat) || 20.2961,
+            lng: parseFloat(body.lng) || 85.8245,
+            type: body.type || "Fire & Rescue",
+            activeRescuers: Array.isArray(body.activeRescuers) ? body.activeRescuers : []
+        };
+        // Upsert by ID
+        rescueStations = rescueStations.filter(s => String(s.id) !== String(newStation.id));
+        rescueStations.push(newStation);
+        saveDatabase();
+        console.log(`[CLOUD SERVER] 🏢 Rescue Station Registered: ${newStation.name} (ID: ${newStation.id})`);
+        notifySseClients('station_new', { station: newStation, stations: rescueStations });
+        return sendJSON(res, 201, { success: true, station: newStation, stations: rescueStations });
+    }
+
+    if (method === 'DELETE' && path.startsWith('/stations/')) {
+        const id = path.split('/')[2];
+        const idx = rescueStations.findIndex(s => String(s.id) === String(id));
+        if (idx !== -1) {
+            const removed = rescueStations.splice(idx, 1)[0];
+            saveDatabase();
+            console.log(`[CLOUD SERVER] 🗑️ Deleted Rescue Station: ${removed.name} (ID: ${id})`);
+            notifySseClients('station_deleted', { id, stations: rescueStations });
+            return sendJSON(res, 200, { success: true, message: `Station "${removed.name}" deleted`, deletedId: id, stations: rescueStations });
+        }
+        return sendJSON(res, 404, { success: false, error: "Rescue station not found" });
+    }
+
     // --- SOS EMERGENCY ALERTS API ---
     if (method === 'GET' && path === '/sos') {
         return sendJSON(res, 200, { success: true, alerts: sosAlerts });
@@ -454,12 +560,29 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && path === '/sos') {
         const body = await getRequestBody(req);
+        const alertLat = parseFloat(body.lat) || 20.2961;
+        const alertLng = parseFloat(body.lng) || 85.8245;
+
+        // Calculate or validate the nearest 3 rescue stations
+        let targetStationIds = Array.isArray(body.targetStationIds) && body.targetStationIds.length > 0
+            ? body.targetStationIds.map(String)
+            : [];
+        let nearestStations = Array.isArray(body.nearestStations) && body.nearestStations.length > 0
+            ? body.nearestStations
+            : [];
+
+        if (targetStationIds.length === 0 && rescueStations.length > 0) {
+            const computed = getNearestRescueStations(alertLat, alertLng, 3);
+            targetStationIds = computed.map(s => String(s.id));
+            nearestStations = computed;
+        }
+
         const newAlert = {
             id: body.id || Date.now(),
             alertId: body.alertId || ("sos_" + Date.now()),
             displayName: body.displayName || "Citizen in Distress",
-            lat: parseFloat(body.lat) || 20.2961,
-            lng: parseFloat(body.lng) || 85.8245,
+            lat: alertLat,
+            lng: alertLng,
             accuracy: parseFloat(body.accuracy) || 10.0,
             contact: body.contact || "Citizen in Distress",
             time: body.time || new Date().toLocaleTimeString(),
@@ -469,13 +592,15 @@ const server = http.createServer(async (req, res) => {
             isMesh: !!body.isMesh,
             hopCount: body.hopCount || 0,
             relayPath: body.relayPath || [],
+            targetStationIds: targetStationIds,
+            nearestStations: nearestStations,
             source: body.source || (body.isMesh ? 'mesh' : 'cloud'),
             timestamp: body.timestamp || new Date().toISOString()
         };
         sosAlerts = sosAlerts.filter(a => String(a.id) !== String(newAlert.id));
         sosAlerts.unshift(newAlert);
         saveDatabase();
-        console.log(`[CLOUD SERVER] 🚨 SOS Alert Triggered! Lat: ${newAlert.lat}, Lng: ${newAlert.lng}, Contact: ${newAlert.contact}`);
+        console.log(`[CLOUD SERVER] 🚨 SOS Alert Triggered! Lat: ${newAlert.lat}, Lng: ${newAlert.lng}, Contact: ${newAlert.contact}, Target Stations: [${targetStationIds.join(', ')}]`);
         notifySseClients('sos_new', newAlert);
         return sendJSON(res, 201, { success: true, alert: newAlert });
     }
